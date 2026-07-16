@@ -52,6 +52,8 @@ ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     if (!m_cacheDir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(m_cacheDir, ec);
+        // Disk caching is optional; if directory creation fails, subsequent
+        // file operations will also fail gracefully (open returns !is_open()).
     }
 }
 
@@ -357,6 +359,8 @@ void ShaderManager::update() {
             m_memCache.erase(key);
         }
 
+        // Copy the descriptor so we can clear enableHotReload without
+        // modifying the stored WatchEntry.desc used by future update() calls.
         ShaderProgramCPU desc = it->second.desc;
         desc.enableHotReload = false;
         auto prog = compile(desc);
