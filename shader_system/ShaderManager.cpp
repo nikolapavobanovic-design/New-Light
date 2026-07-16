@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -46,7 +47,16 @@ ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     : m_api(api)
     , m_cacheDir(std::move(cacheDir))
     , m_compiler(ShaderCompilerFactory::create(api))
-{}
+{
+    if (!m_cacheDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(m_cacheDir, ec);
+        if (ec) {
+            throw std::runtime_error("ShaderManager: failed to create cache directory '" +
+                                     m_cacheDir + "': " + ec.message());
+        }
+    }
+}
 
 ShaderManager::~ShaderManager() = default;
 
