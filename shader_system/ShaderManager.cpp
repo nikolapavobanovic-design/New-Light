@@ -154,6 +154,10 @@ std::shared_ptr<ShaderProgram> ShaderManager::loadFromDiskCache(const std::strin
 void ShaderManager::saveToDiskCache(const std::string& key, const ShaderProgram& prog) const {
     if (m_cacheDir.empty()) return;
 
+    std::error_code ec;
+    std::filesystem::create_directories(m_cacheDir, ec);
+    if (ec) return;
+
     std::ofstream ofs(diskCachePath(m_cacheDir, key), std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return;
 
