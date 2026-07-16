@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <sys/stat.h>
 
 namespace ShaderSystem {
