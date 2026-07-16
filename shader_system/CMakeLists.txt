@@ -35,6 +35,15 @@ endif()
 add_executable(ShaderExample Example.cpp)
 target_link_libraries(ShaderExample PRIVATE ShaderSystemLib)
 
+# Copy example shaders next to the built executable so that Example.cpp can
+# find them via relative paths (e.g., "example_shaders/basic.vs.hlsl").
+add_custom_command(TARGET ShaderExample POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/example_shaders
+        $<TARGET_FILE_DIR:ShaderExample>/example_shaders
+    COMMENT "Copying example_shaders to output directory"
+)
+
 # On POSIX systems the mock filesystem code requires no extra libraries;
 # add platform-specific link targets here if needed.
 if(WIN32)

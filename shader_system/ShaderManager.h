@@ -34,7 +34,8 @@ public:
     // -----------------------------------------------------------------------
 
     // Compile (or retrieve from cache) a full shader program.
-    // Returns nullptr on fatal error.
+    // Always returns a non-null ShaderProgram; check status and stageMessages
+    // on the returned object to detect compilation errors.
     std::shared_ptr<ShaderProgram> compile(const ShaderProgramCPU& desc);
 
     // Compile multiple variants derived from a single base descriptor.

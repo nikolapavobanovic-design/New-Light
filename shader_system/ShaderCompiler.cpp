@@ -125,8 +125,7 @@ CompileResult GLSLCompiler::compile(
     //   ...
 
     (void)defines;
-    (void)entryPoint;
-    result.bytecode = makeMockBytecode(stage, "main");
+    result.bytecode = makeMockBytecode(stage, entryPoint);
     result.status   = CompileStatus::Success;
 
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -169,8 +168,7 @@ CompileResult SPIRVCompiler::compile(
     //   ...
 
     (void)defines;
-    (void)entryPoint;
-    result.bytecode = makeMockBytecode(stage, "main");
+    result.bytecode = makeMockBytecode(stage, entryPoint);
     result.status   = CompileStatus::Success;
 
     auto t1 = std::chrono::high_resolution_clock::now();

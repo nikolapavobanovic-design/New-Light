@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <sys/stat.h>
 
 namespace ShaderSystem {
@@ -46,7 +48,12 @@ ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     : m_api(api)
     , m_cacheDir(std::move(cacheDir))
     , m_compiler(ShaderCompilerFactory::create(api))
-{}
+{
+    if (!m_cacheDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(m_cacheDir, ec);
+    }
+}
 
 ShaderManager::~ShaderManager() = default;
 
@@ -119,11 +126,15 @@ std::shared_ptr<ShaderProgram> ShaderManager::loadFromDiskCache(const std::strin
 
     auto prog = std::make_shared<ShaderProgram>();
     prog->cacheKey = key;
-    prog->status   = CompileStatus::Success;
 
     uint32_t numStages = 0;
     ifs.read(reinterpret_cast<char*>(&numStages), sizeof(numStages));
     if (ifs.fail()) return nullptr;
+
+    // Sanity-check: reject obviously invalid stage counts.
+    constexpr uint32_t kMaxStages = static_cast<uint32_t>(ShaderStage::COUNT);
+    constexpr uint32_t kMaxBcSize = 64u * 1024u * 1024u; // 64 MB per stage
+    if (numStages == 0 || numStages > kMaxStages) return nullptr;
 
     for (uint32_t i = 0; i < numStages; ++i) {
         uint8_t stageId = 0;
@@ -132,11 +143,20 @@ std::shared_ptr<ShaderProgram> ShaderManager::loadFromDiskCache(const std::strin
         ifs.read(reinterpret_cast<char*>(&bcSize), sizeof(bcSize));
         if (ifs.fail()) return nullptr;
 
+        // Reject invalid stage identifiers and suspiciously large bytecode blobs.
+        if (stageId >= kMaxStages) return nullptr;
+        if (bcSize == 0 || bcSize > kMaxBcSize) return nullptr;
+
         Bytecode bc(bcSize);
         ifs.read(reinterpret_cast<char*>(bc.data()), bcSize);
         if (ifs.fail()) return nullptr;
 
         prog->stageBytecode[static_cast<ShaderStage>(stageId)] = std::move(bc);
+    }
+
+    // Only report success when bytecode was actually loaded for all declared stages.
+    if (prog->stageBytecode.size() == numStages) {
+        prog->status = CompileStatus::Success;
     }
     return prog;
 }
@@ -252,7 +272,6 @@ std::shared_ptr<ShaderProgram> ShaderManager::compile(const ShaderProgramCPU& de
             source, si.stage, si.entry, desc.defines, desc.debugInfo, desc.optimizationLevel);
 
         prog->stageMessages[si.stage] = res.messages;
-        prog->totalCompileTimeMs     += res.compileTimeMs;
 
         if (res.status == CompileStatus::Error) {
             prog->status = CompileStatus::Error;
@@ -310,29 +329,41 @@ std::vector<std::shared_ptr<ShaderProgram>> ShaderManager::compileVariants(
 // Hot-reload: update()
 // ---------------------------------------------------------------------------
 void ShaderManager::update() {
+    // Detect changed files first; updating timestamps is safe here because we
+    // are only modifying existing map values, not inserting or erasing entries.
+    std::vector<std::string> toRecompile;
     for (auto& [key, entry] : m_watched) {
         bool changed = false;
         for (auto& [path, oldTime] : entry.fileTimes) {
             int64_t newTime = fileModTime(path);
             if (newTime != oldTime && newTime != -1) {
-                changed  = true;
-                oldTime  = newTime;
+                changed = true;
+                oldTime = newTime;
             }
         }
+        if (changed) toRecompile.push_back(key);
+    }
 
-        if (changed) {
-            // Invalidate memory cache and recompile
-            {
-                std::lock_guard<std::mutex> lock(m_cacheMutex);
-                m_memCache.erase(key);
-            }
+    // Recompile outside the range-for above.  compile() calls watchSources()
+    // when enableHotReload is true, which inserts into m_watched and would
+    // invalidate any iterator still pointing into it.  Disable hot-reload on
+    // the recompile call to avoid that modification.
+    for (const auto& key : toRecompile) {
+        auto it = m_watched.find(key);
+        if (it == m_watched.end()) continue;
 
-            auto prog = compile(entry.desc);
-            if (prog && prog->isValid()) {
-                ++m_stats.hotReloadCount;
-                if (m_reloadCallback) {
-                    m_reloadCallback(key);
-                }
+        {
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
+            m_memCache.erase(key);
+        }
+
+        ShaderProgramCPU desc = it->second.desc;
+        desc.enableHotReload = false;
+        auto prog = compile(desc);
+        if (prog && prog->isValid()) {
+            ++m_stats.hotReloadCount;
+            if (m_reloadCallback) {
+                m_reloadCallback(key);
             }
         }
     }
