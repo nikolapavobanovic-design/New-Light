@@ -1,211 +1,205 @@
 #include "ShaderCompiler.h"
 
-#include <fstream>
+#include <chrono>
 #include <sstream>
-#include <iostream>
-#include <stdexcept>
+
+namespace ShaderSystem {
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-namespace {
 
-// Read an entire text file into a string. Returns empty string on failure.
-static std::string readFile(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return {};
+// Generate a trivial mock bytecode so the rest of the pipeline has something
+// to work with.  In production this would be the output of D3DCompile /
+// glslangValidator / SPIRV-Tools etc.
+static Bytecode makeMockBytecode(ShaderStage stage, const std::string& entryPoint) {
+    // Encode stage + entry-point length into the fake blob so that different
+    // compilations produce distinguishably different "bytecode".
+    Bytecode bc;
+    bc.push_back(static_cast<uint8_t>(stage));
+    bc.push_back(static_cast<uint8_t>(entryPoint.size() & 0xFF));
+    for (char c : entryPoint) {
+        bc.push_back(static_cast<uint8_t>(c));
     }
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
+    // Pad to a round number
+    while (bc.size() < 64) bc.push_back(0xCC);
+    return bc;
 }
 
-// Build a preamble string of #define directives.
-static std::string buildPreamble(
-    const std::unordered_map<std::string, std::string>& defines)
-{
-    std::string preamble;
-    for (const auto& kv : defines) {
-        preamble += "#define " + kv.first;
-        if (!kv.second.empty()) {
-            preamble += " " + kv.second;
-        }
-        preamble += "\n";
-    }
-    return preamble;
+// ---------------------------------------------------------------------------
+// DirectXCompiler
+// ---------------------------------------------------------------------------
+
+DirectXCompiler::DirectXCompiler(bool useDXC) : m_useDXC(useDXC) {}
+
+std::string DirectXCompiler::name() const {
+    return m_useDXC ? "DirectXCompiler (DXC)" : "DirectXCompiler (D3DCompile)";
 }
 
-// Placeholder: produce mock bytecode (a copy of source bytes).
-// In production replace with real compiler invocations.
-static std::vector<uint8_t> makeMockBytecode(const std::string& source,
-                                              ShaderStage stage,
-                                              const std::string& entry) {
-    // Tag the mock output so tests can verify per-stage content.
-    std::string tagged = "[stage:" + std::to_string(static_cast<int>(stage)) +
-                         "|entry:" + entry + "]\n" + source;
-    return std::vector<uint8_t>(tagged.begin(), tagged.end());
-}
-
-} // namespace
-
-// ===========================================================================
-// DirectXShaderCompiler
-// ===========================================================================
-DirectXShaderCompiler::DirectXShaderCompiler(GraphicsAPI api) : m_api(api) {}
-
-std::string DirectXShaderCompiler::shaderModel(ShaderStage stage) const {
-    const bool isDX12 = (m_api == GraphicsAPI::DirectX12);
-    const std::string ver = isDX12 ? "5_1" : "5_0";
-
+std::string DirectXCompiler::hlslProfile(ShaderStage stage, bool useDXC) {
+    // DXC uses shader model 6.x; legacy D3DCompile uses 5.x.
+    const char* ver = useDXC ? "6_0" : "5_0";
     switch (stage) {
-        case ShaderStage::Vertex:      return "vs_" + ver;
-        case ShaderStage::Pixel:       return "ps_" + ver;
-        case ShaderStage::Compute:     return "cs_" + ver;
-        case ShaderStage::Geometry:    return "gs_" + ver;
-        case ShaderStage::TessControl: return "hs_" + ver;
-        case ShaderStage::TessEval:    return "ds_" + ver;
-        default:                       return "vs_" + ver;
+        case ShaderStage::Vertex:      return std::string("vs_") + ver;
+        case ShaderStage::Pixel:       return std::string("ps_") + ver;
+        case ShaderStage::Compute:     return std::string("cs_") + ver;
+        case ShaderStage::Geometry:    return std::string("gs_") + ver;
+        case ShaderStage::TessControl: return std::string("hs_") + ver;
+        case ShaderStage::TessEval:    return std::string("ds_") + ver;
+        default:                       return "unknown";
     }
 }
 
-CompileResult DirectXShaderCompiler::compile(
-    const std::string& sourcePath,
+CompileResult DirectXCompiler::compile(
+    const std::string& source,
     ShaderStage        stage,
     const std::string& entryPoint,
     const std::unordered_map<std::string, std::string>& defines,
-    int                /*optLevel*/)
+    bool /*debugInfo*/,
+    int  /*optLevel*/)
 {
-    std::string source = readFile(sourcePath);
-    if (source.empty()) {
-        return { CompileStatus::Error, "Cannot open file: " + sourcePath, {} };
-    }
-
-    std::string fullSource = buildPreamble(defines) + source;
-
-    // -----------------------------------------------------------------
-    // Production integration point:
-    //   HRESULT hr = D3DCompile(fullSource.c_str(), fullSource.size(),
-    //       sourcePath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-    //       entryPoint.c_str(), shaderModel(stage).c_str(),
-    //       flags, 0, &blob, &errBlob);
-    // -----------------------------------------------------------------
+    auto t0 = std::chrono::high_resolution_clock::now();
 
     CompileResult result;
+
+    if (source.empty()) {
+        result.status = CompileStatus::Error;
+        result.messages.push_back({CompileStatus::Error, "Empty source passed to DirectXCompiler", -1, ""});
+        return result;
+    }
+
+    // --- PRODUCTION INTEGRATION POINT ---
+    // Replace the lines below with a real D3DCompile() / DXC call:
+    //
+    //   ID3DBlob* pCode = nullptr;
+    //   ID3DBlob* pErrors = nullptr;
+    //   std::vector<D3D_SHADER_MACRO> macros = buildMacros(defines);
+    //   HRESULT hr = D3DCompile(
+    //       source.c_str(), source.size(), nullptr,
+    //       macros.data(), D3D_COMPILE_STANDARD_FILE_INCLUDE,
+    //       entryPoint.c_str(), hlslProfile(stage, m_useDXC).c_str(),
+    //       flags, 0, &pCode, &pErrors);
+    //   ...
+
+    (void)defines; // suppress unused-variable warning in mock
+    result.bytecode = makeMockBytecode(stage, entryPoint);
     result.status   = CompileStatus::Success;
-    result.bytecode = makeMockBytecode(fullSource, stage, entryPoint);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.compileTimeMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     return result;
 }
 
-// ===========================================================================
-// GLSLShaderCompiler
-// ===========================================================================
-GLSLShaderCompiler::GLSLShaderCompiler() {}
+// ---------------------------------------------------------------------------
+// GLSLCompiler
+// ---------------------------------------------------------------------------
 
-CompileResult GLSLShaderCompiler::compile(
-    const std::string& sourcePath,
+CompileResult GLSLCompiler::compile(
+    const std::string& source,
     ShaderStage        stage,
     const std::string& entryPoint,
     const std::unordered_map<std::string, std::string>& defines,
-    int                /*optLevel*/)
+    bool /*debugInfo*/,
+    int  /*optLevel*/)
 {
-    std::string source = readFile(sourcePath);
-    if (source.empty()) {
-        return { CompileStatus::Error, "Cannot open file: " + sourcePath, {} };
-    }
-
-    std::string fullSource = "#version 450 core\n" + buildPreamble(defines) + source;
-
-    // -----------------------------------------------------------------
-    // Production integration point:
-    //   glslang::InitializeProcess();
-    //   glslang::TShader shader(eShStage);
-    //   shader.setStrings(...);
-    //   shader.parse(...);
-    // -----------------------------------------------------------------
+    auto t0 = std::chrono::high_resolution_clock::now();
 
     CompileResult result;
+
+    if (source.empty()) {
+        result.status = CompileStatus::Error;
+        result.messages.push_back({CompileStatus::Error, "Empty source passed to GLSLCompiler", -1, ""});
+        return result;
+    }
+
+    // --- PRODUCTION INTEGRATION POINT ---
+    // Replace with glslang TShader / TProgram calls:
+    //
+    //   glslang::TShader shader(glslStage(stage));
+    //   std::string preamble = buildPreamble(defines);
+    //   const char* strings[] = { preamble.c_str(), source.c_str() };
+    //   shader.setStrings(strings, 2);
+    //   shader.parse(&DefaultTBuiltInResource, 450, false, messages);
+    //   ...
+
+    (void)defines;
+    (void)entryPoint;
+    result.bytecode = makeMockBytecode(stage, "main");
     result.status   = CompileStatus::Success;
-    result.bytecode = makeMockBytecode(fullSource, stage, entryPoint);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.compileTimeMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     return result;
 }
 
-// ===========================================================================
-// VulkanShaderCompiler
-// ===========================================================================
-VulkanShaderCompiler::VulkanShaderCompiler() {}
+// ---------------------------------------------------------------------------
+// SPIRVCompiler
+// ---------------------------------------------------------------------------
 
-CompileResult VulkanShaderCompiler::compile(
-    const std::string& sourcePath,
+CompileResult SPIRVCompiler::compile(
+    const std::string& source,
     ShaderStage        stage,
     const std::string& entryPoint,
     const std::unordered_map<std::string, std::string>& defines,
-    int                /*optLevel*/)
+    bool /*debugInfo*/,
+    int  /*optLevel*/)
 {
-    std::string source = readFile(sourcePath);
-    if (source.empty()) {
-        return { CompileStatus::Error, "Cannot open file: " + sourcePath, {} };
-    }
-
-    std::string fullSource = "#version 450\n" + buildPreamble(defines) + source;
-
-    // -----------------------------------------------------------------
-    // Production integration point:
-    //   Use glslang + SPIRV-Tools to produce SPIR-V words, or invoke
-    //   glslangValidator / shaderc as a subprocess / library.
-    // -----------------------------------------------------------------
+    auto t0 = std::chrono::high_resolution_clock::now();
 
     CompileResult result;
+
+    if (source.empty()) {
+        result.status = CompileStatus::Error;
+        result.messages.push_back({CompileStatus::Error, "Empty source passed to SPIRVCompiler", -1, ""});
+        return result;
+    }
+
+    // --- PRODUCTION INTEGRATION POINT ---
+    // Use glslang + SPIRV-Tools, or shaderc:
+    //
+    //   shaderc::Compiler compiler;
+    //   shaderc::CompileOptions options;
+    //   for (auto& [k, v] : defines) options.AddMacroDefinition(k, v);
+    //   auto res = compiler.CompileGlslToSpv(
+    //       source, shadercKind(stage), "shader", options);
+    //   ...
+
+    (void)defines;
+    (void)entryPoint;
+    result.bytecode = makeMockBytecode(stage, "main");
     result.status   = CompileStatus::Success;
-    result.bytecode = makeMockBytecode(fullSource, stage, entryPoint);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    result.compileTimeMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     return result;
 }
 
-// ===========================================================================
-// MetalShaderCompiler
-// ===========================================================================
-MetalShaderCompiler::MetalShaderCompiler() {}
-
-CompileResult MetalShaderCompiler::compile(
-    const std::string& sourcePath,
-    ShaderStage        stage,
-    const std::string& entryPoint,
-    const std::unordered_map<std::string, std::string>& defines,
-    int                /*optLevel*/)
-{
-    std::string source = readFile(sourcePath);
-    if (source.empty()) {
-        return { CompileStatus::Error, "Cannot open file: " + sourcePath, {} };
-    }
-
-    std::string fullSource = buildPreamble(defines) + source;
-
-    // -----------------------------------------------------------------
-    // Production integration point:
-    //   Use MTLDevice newLibraryWithSource:options:error: on Apple platforms.
-    // -----------------------------------------------------------------
-
-    CompileResult result;
-    result.status   = CompileStatus::Success;
-    result.bytecode = makeMockBytecode(fullSource, stage, entryPoint);
-    return result;
-}
-
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // ShaderCompilerFactory
-// ===========================================================================
+// ---------------------------------------------------------------------------
+
 std::unique_ptr<IShaderCompiler> ShaderCompilerFactory::create(GraphicsAPI api) {
     switch (api) {
         case GraphicsAPI::DirectX11:
+            return std::make_unique<DirectXCompiler>(/*useDXC=*/false);
         case GraphicsAPI::DirectX12:
-            return std::make_unique<DirectXShaderCompiler>(api);
+            return std::make_unique<DirectXCompiler>(/*useDXC=*/true);
         case GraphicsAPI::OpenGL:
-            return std::make_unique<GLSLShaderCompiler>();
+            return std::make_unique<GLSLCompiler>();
         case GraphicsAPI::Vulkan:
-            return std::make_unique<VulkanShaderCompiler>();
+            return std::make_unique<SPIRVCompiler>();
         case GraphicsAPI::Metal:
-            return std::make_unique<MetalShaderCompiler>();
+            // Metal uses MSL; fall back to GLSL cross-compiler for now.
+            return std::make_unique<SPIRVCompiler>();
         default:
-            throw std::runtime_error("Unknown GraphicsAPI");
+            return std::make_unique<DirectXCompiler>(false);
     }
 }
+
+} // namespace ShaderSystem

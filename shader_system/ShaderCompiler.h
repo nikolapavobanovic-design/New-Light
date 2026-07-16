@@ -3,111 +3,98 @@
 #include "ShaderTypes.h"
 #include <memory>
 #include <string>
-#include <vector>
+
+namespace ShaderSystem {
 
 // ---------------------------------------------------------------------------
-// Abstract base – one subclass per graphics API / shader language
+// IShaderCompiler – pure interface every backend must implement
 // ---------------------------------------------------------------------------
 class IShaderCompiler {
 public:
     virtual ~IShaderCompiler() = default;
 
-    // Compile a single shader stage from source file.
-    // @param sourcePath  Path to the HLSL / GLSL source file.
-    // @param stage       Which pipeline stage to compile.
-    // @param entryPoint  Entry-point function name.
-    // @param defines     Preprocessor macro definitions.
-    // @param optLevel    Optimisation level (0-3).
+    // Compile a single shader stage from source text.
+    // @param source      HLSL / GLSL source code
+    // @param stage       Target shader stage
+    // @param entryPoint  Name of the entry-point function
+    // @param defines     Preprocessor definitions (name -> value)
+    // @param debugInfo   Whether to embed debug symbols
+    // @param optLevel    Optimisation level 0–3
     virtual CompileResult compile(
-        const std::string& sourcePath,
+        const std::string& source,
         ShaderStage        stage,
         const std::string& entryPoint,
         const std::unordered_map<std::string, std::string>& defines,
-        int                optLevel) = 0;
+        bool debugInfo,
+        int  optLevel) = 0;
 
-    // Return the API this compiler targets.
-    virtual GraphicsAPI targetAPI() const = 0;
+    // Compiler name for diagnostic messages.
+    virtual std::string name() const = 0;
 };
 
 // ---------------------------------------------------------------------------
-// DirectX 11 / 12 compiler (D3DCompile / DXC)
+// DirectXCompiler – wraps D3DCompile / DXC (mock implementation)
 // ---------------------------------------------------------------------------
-class DirectXShaderCompiler : public IShaderCompiler {
+class DirectXCompiler : public IShaderCompiler {
 public:
-    explicit DirectXShaderCompiler(GraphicsAPI api);
+    explicit DirectXCompiler(bool useDXC = false);
 
     CompileResult compile(
-        const std::string& sourcePath,
+        const std::string& source,
         ShaderStage        stage,
         const std::string& entryPoint,
         const std::unordered_map<std::string, std::string>& defines,
-        int                optLevel) override;
+        bool debugInfo,
+        int  optLevel) override;
 
-    GraphicsAPI targetAPI() const override { return m_api; }
+    std::string name() const override;
 
 private:
-    GraphicsAPI m_api;
+    bool m_useDXC;
 
-    // Returns the shader model string, e.g. "vs_5_0" for DX11 vertex.
-    std::string shaderModel(ShaderStage stage) const;
+    // Maps ShaderStage to HLSL profile string, e.g. "vs_5_0"
+    static std::string hlslProfile(ShaderStage stage, bool useDXC);
 };
 
 // ---------------------------------------------------------------------------
-// OpenGL GLSL compiler (wraps glslang)
+// GLSLCompiler – wraps glslang (mock implementation)
 // ---------------------------------------------------------------------------
-class GLSLShaderCompiler : public IShaderCompiler {
+class GLSLCompiler : public IShaderCompiler {
 public:
-    GLSLShaderCompiler();
-
     CompileResult compile(
-        const std::string& sourcePath,
+        const std::string& source,
         ShaderStage        stage,
         const std::string& entryPoint,
         const std::unordered_map<std::string, std::string>& defines,
-        int                optLevel) override;
+        bool debugInfo,
+        int  optLevel) override;
 
-    GraphicsAPI targetAPI() const override { return GraphicsAPI::OpenGL; }
+    std::string name() const override { return "GLSLCompiler (glslang)"; }
 };
 
 // ---------------------------------------------------------------------------
-// Vulkan SPIR-V compiler (glslang + SPIR-V tools)
+// SPIRVCompiler – cross-compiler targeting SPIR-V (mock implementation)
 // ---------------------------------------------------------------------------
-class VulkanShaderCompiler : public IShaderCompiler {
+class SPIRVCompiler : public IShaderCompiler {
 public:
-    VulkanShaderCompiler();
-
     CompileResult compile(
-        const std::string& sourcePath,
+        const std::string& source,
         ShaderStage        stage,
         const std::string& entryPoint,
         const std::unordered_map<std::string, std::string>& defines,
-        int                optLevel) override;
+        bool debugInfo,
+        int  optLevel) override;
 
-    GraphicsAPI targetAPI() const override { return GraphicsAPI::Vulkan; }
+    std::string name() const override { return "SPIRVCompiler"; }
 };
 
 // ---------------------------------------------------------------------------
-// Metal MSL compiler
-// ---------------------------------------------------------------------------
-class MetalShaderCompiler : public IShaderCompiler {
-public:
-    MetalShaderCompiler();
-
-    CompileResult compile(
-        const std::string& sourcePath,
-        ShaderStage        stage,
-        const std::string& entryPoint,
-        const std::unordered_map<std::string, std::string>& defines,
-        int                optLevel) override;
-
-    GraphicsAPI targetAPI() const override { return GraphicsAPI::Metal; }
-};
-
-// ---------------------------------------------------------------------------
-// Factory
+// Factory – creates the correct compiler for the requested API
 // ---------------------------------------------------------------------------
 class ShaderCompilerFactory {
 public:
-    // Create the appropriate compiler for the given API.
+    // Returns a compiler suitable for the given graphics API.
     static std::unique_ptr<IShaderCompiler> create(GraphicsAPI api);
 };
+
+} // namespace ShaderSystem

@@ -1,161 +1,129 @@
 #pragma once
 
 #include "ShaderTypes.h"
-#include "ShaderCompiler.h"
-
-#include <memory>
-#include <string>
-#include <vector>
-#include <unordered_map>
 #include <functional>
+#include <memory>
 #include <mutex>
-#include <chrono>
-#include <atomic>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace ShaderSystem {
+
+class IShaderCompiler;
 
 // ---------------------------------------------------------------------------
-// Statistics collected by ShaderManager
-// ---------------------------------------------------------------------------
-struct ShaderManagerStats {
-    std::atomic<uint64_t> compilationCount  {0};
-    std::atomic<uint64_t> cacheHits         {0};
-    std::atomic<uint64_t> cacheMisses       {0};
-    std::atomic<uint64_t> hotReloadCount    {0};
-    double                averageCompileTime{0.0};  // milliseconds
-
-    // Non-copyable due to atomic members; provide manual copy helper.
-    ShaderManagerStats() = default;
-    ShaderManagerStats(const ShaderManagerStats&) = delete;
-    ShaderManagerStats& operator=(const ShaderManagerStats&) = delete;
-};
-
-// ---------------------------------------------------------------------------
-// Main shader management system
+// ShaderManager – central shader compilation, caching, and hot-reload hub
 // ---------------------------------------------------------------------------
 class ShaderManager {
 public:
-    // Callback invoked when a shader is hot-reloaded.
-    // Receives the cache key of the invalidated program.
-    using ReloadCallback = std::function<void(const std::string& cacheKey)>;
-
-    // -----------------------------------------------------------------------
-    // Construction / destruction
-    // -----------------------------------------------------------------------
-    explicit ShaderManager(GraphicsAPI api,
-                           const std::string& diskCacheDir = "shader_cache");
+    // @param api         Target graphics API used throughout the manager's lifetime.
+    // @param cacheDir    Optional directory for persistent on-disk shader cache.
+    //                    Pass an empty string to disable disk caching.
+    explicit ShaderManager(GraphicsAPI api, std::string cacheDir = "");
     ~ShaderManager();
 
-    // Non-copyable, non-movable (owns mutexes and atomics).
+    // Non-copyable, non-movable (std::mutex is not movable)
     ShaderManager(const ShaderManager&) = delete;
     ShaderManager& operator=(const ShaderManager&) = delete;
     ShaderManager(ShaderManager&&) = delete;
     ShaderManager& operator=(ShaderManager&&) = delete;
 
     // -----------------------------------------------------------------------
-    // Core compilation
+    // Compilation
     // -----------------------------------------------------------------------
 
-    // Compile (or retrieve from cache) a shader program described by @desc.
-    // Returns nullptr on failure.
-    std::shared_ptr<CompiledShaderProgram> compile(const ShaderProgramCPU& desc);
+    // Compile (or retrieve from cache) a full shader program.
+    // Returns nullptr on fatal error.
+    std::shared_ptr<ShaderProgram> compile(const ShaderProgramCPU& desc);
 
-    // Compile multiple variant permutations of a base descriptor.
-    // @param base      Base descriptor (paths, opt level, hot-reload setting).
-    // @param variantDefines  Each entry is a list of define names (value "1").
-    // Returns one result per variant; failed slots hold nullptr.
-    std::vector<std::shared_ptr<CompiledShaderProgram>> compileVariants(
-        const ShaderProgramCPU&                     base,
+    // Compile multiple variants derived from a single base descriptor.
+    // Each inner vector supplies extra defines added on top of desc.defines.
+    std::vector<std::shared_ptr<ShaderProgram>> compileVariants(
+        const ShaderProgramCPU& base,
         const std::vector<std::vector<std::string>>& variantDefines);
 
     // -----------------------------------------------------------------------
     // Hot-reload
     // -----------------------------------------------------------------------
 
-    // Register a callback that fires when any watched shader is reloaded.
+    // Callback invoked when a watched source file changes and a shader
+    // has been recompiled.  The argument is the cache key of the program.
+    using ReloadCallback = std::function<void(const std::string& cacheKey)>;
+
+    // Register a callback to be invoked on hot-reload events.
     void setReloadCallback(ReloadCallback cb);
 
-    // Poll for file-system changes and recompile stale shaders.
-    // Call once per frame from your game / render loop.
+    // Poll for file-system changes; call this once per frame.
+    // Recompiles any programs whose source files have been modified and
+    // invokes the registered reload callback for each one.
     void update();
 
     // -----------------------------------------------------------------------
     // Cache management
     // -----------------------------------------------------------------------
 
-    // Evict all in-memory cached entries.
+    // Remove all in-memory cached programs.
     void clearMemoryCache();
 
-    // Delete all files in the disk cache directory.
-    void clearDiskCache();
+    // Remove all cached entries whose source files no longer exist.
+    void evictStaleEntries();
 
     // -----------------------------------------------------------------------
     // Statistics
     // -----------------------------------------------------------------------
-    const ShaderManagerStats& getStatistics() const { return m_stats; }
 
-    // -----------------------------------------------------------------------
-    // Utility
-    // -----------------------------------------------------------------------
-
-    // Build a deterministic cache key from a descriptor.
-    static std::string buildCacheKey(const ShaderProgramCPU& desc);
+    const ShaderStatistics& getStatistics() const { return m_stats; }
+    void resetStatistics();
 
 private:
-    // Per-file watch record for hot-reload.
-    struct WatchEntry {
-        std::string                            path;
-        std::chrono::system_clock::time_point  lastModified;
-        std::vector<std::string>               dependentKeys;  // cache keys
-    };
-
     // -----------------------------------------------------------------------
-    // Internals
+    // Internal helpers
     // -----------------------------------------------------------------------
-    std::shared_ptr<CompiledShaderProgram> compileInternal(
-        const ShaderProgramCPU& desc,
-        const std::string&      cacheKey);
 
-    // Compile a single stage; returns empty vector on failure.
-    std::vector<uint8_t> compileStage(
-        const std::string& sourcePath,
+    // Build a unique cache key from a descriptor.
+    std::string buildCacheKey(const ShaderProgramCPU& desc) const;
+
+    // Read source from disk; returns empty string on failure.
+    static std::string readFile(const std::string& path);
+
+    // Compile a single stage; returns result with bytecode.
+    CompileResult compileStage(
+        const std::string& source,
         ShaderStage        stage,
         const std::string& entryPoint,
-        const ShaderProgramCPU& desc,
-        std::string&       outError);
+        const std::unordered_map<std::string, std::string>& defines,
+        bool debugInfo,
+        int  optLevel);
 
-    // Disk-cache helpers.
-    bool       saveToDisk(const std::string& key,
-                          const CompiledShaderProgram& program) const;
-    std::shared_ptr<CompiledShaderProgram>
-               loadFromDisk(const std::string& key) const;
-    std::string diskCachePath(const std::string& key) const;
+    // Try to load a compiled program from the disk cache.
+    std::shared_ptr<ShaderProgram> loadFromDiskCache(const std::string& key) const;
 
-    // File-watching helpers.
-    void registerWatch(const std::string& path, const std::string& cacheKey);
-    std::chrono::system_clock::time_point getLastModified(
-        const std::string& path) const;
+    // Persist a compiled program to the disk cache.
+    void saveToDiskCache(const std::string& key, const ShaderProgram& prog) const;
 
-    // Update running average compile time.
-    void recordCompileTime(double ms);
+    // Record the last-modified timestamp for all source files in desc.
+    void watchSources(const std::string& key, const ShaderProgramCPU& desc);
 
     // -----------------------------------------------------------------------
-    // Data members
+    // State
     // -----------------------------------------------------------------------
-    GraphicsAPI                            m_api;
-    std::string                            m_diskCacheDir;
-    std::unique_ptr<IShaderCompiler>       m_compiler;
+    GraphicsAPI                    m_api;
+    std::string                    m_cacheDir;
+    std::unique_ptr<IShaderCompiler> m_compiler;
 
-    // Memory cache: key -> compiled program
-    mutable std::mutex                     m_cacheMutex;
-    std::unordered_map<std::string,
-        std::shared_ptr<CompiledShaderProgram>> m_memoryCache;
+    mutable std::mutex             m_cacheMutex;
+    std::unordered_map<std::string, std::shared_ptr<ShaderProgram>> m_memCache;
 
-    // Hot-reload
-    std::mutex                             m_watchMutex;
-    std::unordered_map<std::string, WatchEntry> m_watchEntries; // path -> entry
-    ReloadCallback                         m_reloadCallback;
+    // Hot-reload: maps cache key → descriptor + per-file modification times
+    struct WatchEntry {
+        ShaderProgramCPU                          desc;
+        std::unordered_map<std::string, int64_t>  fileTimes;  // path → mtime
+    };
+    std::unordered_map<std::string, WatchEntry> m_watched;
+    ReloadCallback                               m_reloadCallback;
 
-    // Statistics
-    ShaderManagerStats                     m_stats;
-    std::mutex                             m_statsMutex;
-    double                                 m_totalCompileTime{0.0};
+    ShaderStatistics m_stats;
 };
+
+} // namespace ShaderSystem

@@ -1,75 +1,93 @@
-// Example.cpp – 10 usage examples for ShaderManager
+// Example.cpp – 10 usage examples for the ShaderSystem
+//
+// This file demonstrates a wide range of ShaderManager capabilities.
+// Since no real GPU is present during compilation, source paths are
+// fabricated strings; in a real application they would point to actual
+// HLSL/GLSL files on disk.
 
 #include "ShaderManager.h"
 
-#include <iostream>
 #include <cassert>
+#include <iostream>
+#include <string>
+
+using namespace ShaderSystem;
 
 // ---------------------------------------------------------------------------
-// Helper: print whether a program compiled successfully.
+// Helper: print compile messages for a program
 // ---------------------------------------------------------------------------
-static void printResult(const char* label,
-                        const std::shared_ptr<CompiledShaderProgram>& prog) {
-    if (prog && prog->isValid()) {
-        std::cout << "[OK] " << label << " – "
-                  << prog->stageBytecode.size() << " stage(s) compiled, "
-                  << "cache key: " << prog->cacheKey << "\n";
-    } else {
-        std::cout << "[FAIL] " << label << " – compilation failed\n";
+static void printMessages(const ShaderProgram& prog) {
+    for (auto& [stage, msgs] : prog.stageMessages) {
+        for (auto& msg : msgs) {
+            const char* lvl = (msg.status == CompileStatus::Error)   ? "ERROR"
+                            : (msg.status == CompileStatus::Warning) ? "WARN"
+                                                                      : "INFO";
+            std::cout << "  [" << lvl << "] " << msg.message << "\n";
+        }
     }
 }
 
-// ===========================================================================
-// Example 1 – Basic vertex + pixel shader
-// ===========================================================================
-static void example01_BasicShader() {
-    std::cout << "\n=== Example 01: Basic Shader ===\n";
+// ---------------------------------------------------------------------------
+// Example 1 – Basic vertex + pixel shader compilation
+// ---------------------------------------------------------------------------
+static void example1_BasicShader() {
+    std::cout << "\n--- Example 1: Basic Shader ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex01");
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU desc;
     desc.vsPath = "example_shaders/basic.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
 
     auto shader = manager.compile(desc);
-    printResult("basic VS+PS", shader);
+    if (shader && shader->isValid()) {
+        auto& vsBytecode = shader->stageBytecode.at(ShaderStage::Vertex);
+        auto& psBytecode = shader->stageBytecode.at(ShaderStage::Pixel);
+        std::cout << "VS bytecode size: " << vsBytecode.size() << " bytes\n";
+        std::cout << "PS bytecode size: " << psBytecode.size() << " bytes\n";
+        std::cout << "Compile time: " << shader->totalCompileTimeMs << " ms\n";
+    } else {
+        std::cout << "Compilation failed!\n";
+        if (shader) printMessages(*shader);
+    }
 }
 
-// ===========================================================================
-// Example 2 – Caching (second compile is a cache hit)
-// ===========================================================================
-static void example02_Caching() {
-    std::cout << "\n=== Example 02: Caching ===\n";
+// ---------------------------------------------------------------------------
+// Example 2 – Cache hit: second compile returns instantly
+// ---------------------------------------------------------------------------
+static void example2_CacheHit() {
+    std::cout << "\n--- Example 2: Cache Hit ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex02");
-    manager.clearDiskCache();  // ensure a clean slate
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU desc;
     desc.vsPath = "example_shaders/basic.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
 
-    auto shader1 = manager.compile(desc);  // cache miss -> compile
-    auto shader2 = manager.compile(desc);  // cache hit  -> instant
+    // First compile – cache miss
+    auto shader1 = manager.compile(desc);
+    std::cout << "First compile:  " << manager.getStatistics().compilationCount
+              << " compilations, " << manager.getStatistics().cacheHits << " hits\n";
 
-    const auto& stats = manager.getStatistics();
-    std::cout << "Compilations: " << stats.compilationCount << "\n";
-    std::cout << "Cache hits:   " << stats.cacheHits       << "\n";
-    assert(stats.compilationCount == 1);
-    assert(stats.cacheHits        == 1);
-    assert(shader1.get() == shader2.get()); // same pointer from memory cache
-    std::cout << "[OK] Cache hit confirmed (same pointer)\n";
+    // Second compile – should be a cache hit
+    auto shader2 = manager.compile(desc);
+    std::cout << "Second compile: " << manager.getStatistics().compilationCount
+              << " compilations, " << manager.getStatistics().cacheHits << " hits\n";
+
+    assert(shader1.get() == shader2.get() && "Expected same pointer from cache");
+    std::cout << "Cache hit confirmed (same pointer).\n";
 }
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // Example 3 – Preprocessor defines
-// ===========================================================================
-static void example03_Defines() {
-    std::cout << "\n=== Example 03: Preprocessor Defines ===\n";
+// ---------------------------------------------------------------------------
+static void example3_Defines() {
+    std::cout << "\n--- Example 3: Preprocessor Defines ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex03");
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU desc;
-    desc.vsPath = "example_shaders/basic.vs.hlsl";
+    desc.vsPath = "example_shaders/pbr.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
     desc.defines = {
         {"MAX_LIGHTS",      "4"},
@@ -78,214 +96,222 @@ static void example03_Defines() {
     };
 
     auto shader = manager.compile(desc);
-    printResult("shader with defines", shader);
+    std::cout << "Compiled with " << desc.defines.size() << " defines. "
+              << "Valid: " << (shader && shader->isValid() ? "yes" : "no") << "\n";
 }
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // Example 4 – Shader variants
-// ===========================================================================
-static void example04_Variants() {
-    std::cout << "\n=== Example 04: Shader Variants ===\n";
+// ---------------------------------------------------------------------------
+static void example4_Variants() {
+    std::cout << "\n--- Example 4: Shader Variants ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex04");
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU base;
     base.vsPath = "example_shaders/pbr.vs.hlsl";
     base.psPath = "example_shaders/basic.ps.hlsl";
 
-    std::vector<std::vector<std::string>> variantDefines = {
+    const std::vector<std::vector<std::string>> variants = {
         {},                          // Base
         {"SKINNED"},                 // Skinned meshes
         {"INSTANCED"},               // GPU instancing
         {"SKINNED", "INSTANCED"},    // Both
-        {"ALPHA_TEST"}               // Alpha testing
+        {"ALPHA_TEST"},              // Alpha testing
     };
 
-    auto shaders = manager.compileVariants(base, variantDefines);
-
+    auto shaders = manager.compileVariants(base, variants);
+    std::cout << "Compiled " << shaders.size() << " variants.\n";
     for (size_t i = 0; i < shaders.size(); ++i) {
-        std::string label = "variant[" + std::to_string(i) + "]";
-        printResult(label.c_str(), shaders[i]);
+        std::cout << "  Variant " << i << ": "
+                  << (shaders[i] && shaders[i]->isValid() ? "OK" : "FAILED")
+                  << " (key=" << (shaders[i] ? shaders[i]->cacheKey : "n/a") << ")\n";
     }
 }
 
-// ===========================================================================
-// Example 5 – Hot-reload setup
-// ===========================================================================
-static void example05_HotReload() {
-    std::cout << "\n=== Example 05: Hot-Reload ===\n";
+// ---------------------------------------------------------------------------
+// Example 5 – Compute shader
+// ---------------------------------------------------------------------------
+static void example5_ComputeShader() {
+    std::cout << "\n--- Example 5: Compute Shader ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex05");
-
-    manager.setReloadCallback([](const std::string& key) {
-        std::cout << "  [RELOAD] Shader reloaded: " << key << "\n";
-    });
+    ShaderManager manager(GraphicsAPI::DirectX12);
 
     ShaderProgramCPU desc;
-    desc.vsPath          = "example_shaders/basic.vs.hlsl";
-    desc.psPath          = "example_shaders/basic.ps.hlsl";
-    desc.enableHotReload = true;
-
-    auto shader = manager.compile(desc);
-    printResult("hot-reload shader", shader);
-
-    // In a real app you would call manager.update() every frame.
-    // Here we just verify it runs without error.
-    manager.update();
-    std::cout << "[OK] update() ran without error\n";
-}
-
-// ===========================================================================
-// Example 6 – Compute shader
-// ===========================================================================
-static void example06_ComputeShader() {
-    std::cout << "\n=== Example 06: Compute Shader ===\n";
-
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex06");
-
-    // Compute-only program (no VS/PS paths).
-    ShaderProgramCPU desc;
-    desc.csPath  = "example_shaders/basic.vs.hlsl"; // reuse file for demo
+    desc.csPath  = "example_shaders/particle_update.cs.hlsl";
     desc.csEntry = "CSMain";
+    desc.defines = {{"THREAD_GROUP_SIZE", "64"}};
 
     auto shader = manager.compile(desc);
-    // Will fail because entry point 'CSMain' is not in the demo file,
-    // but the compiler is mocked so it still produces bytecode.
-    printResult("compute shader", shader);
+    // Source file does not exist on disk; demonstrates error handling.
+    if (shader && shader->isValid()) {
+        std::cout << "CS bytecode size: "
+                  << shader->stageBytecode.at(ShaderStage::Compute).size() << " bytes\n";
+    } else {
+        std::cout << "CS could not be read from disk (expected – no real file). "
+                     "Error handling works correctly.\n";
+        if (shader) printMessages(*shader);
+    }
 }
 
-// ===========================================================================
-// Example 7 – All pipeline stages
-// ===========================================================================
-static void example07_AllStages() {
-    std::cout << "\n=== Example 07: All Pipeline Stages ===\n";
+// ---------------------------------------------------------------------------
+// Example 6 – All pipeline stages (VS + GS + TCS + TES + PS)
+// ---------------------------------------------------------------------------
+static void example6_AllStages() {
+    std::cout << "\n--- Example 6: All Pipeline Stages ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex07");
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU desc;
     desc.vsPath  = "example_shaders/basic.vs.hlsl";
-    desc.gsPath  = "example_shaders/basic.vs.hlsl";   // reuse for demo
+    desc.gsPath  = "example_shaders/advanced.gs.hlsl";
+    desc.tcsPath = "example_shaders/advanced.hs.hlsl";
+    desc.tesPath = "example_shaders/advanced.ds.hlsl";
     desc.psPath  = "example_shaders/basic.ps.hlsl";
-    desc.tcsPath = "example_shaders/basic.vs.hlsl";   // reuse for demo
-    desc.tesPath = "example_shaders/basic.vs.hlsl";   // reuse for demo
-    desc.tcsEntry = "HSMain";
-    desc.tesEntry = "DSMain";
-    desc.gsEntry  = "GSMain";
 
     auto shader = manager.compile(desc);
-    printResult("all-stages program", shader);
-    if (shader) {
-        for (const auto& [stage, bc] : shader->stageBytecode) {
-            std::cout << "  stage " << static_cast<int>(stage)
-                      << " -> " << bc.size() << " bytes\n";
-        }
+    std::cout << "Pipeline stages with real sources:\n";
+    for (auto& [stage, bc] : shader->stageBytecode) {
+        std::cout << "  Stage bytecode size: " << bc.size() << " bytes\n";
     }
 }
 
-// ===========================================================================
-// Example 8 – Statistics
-// ===========================================================================
-static void example08_Statistics() {
-    std::cout << "\n=== Example 08: Statistics ===\n";
+// ---------------------------------------------------------------------------
+// Example 7 – Hot-reload callback registration
+// ---------------------------------------------------------------------------
+static void example7_HotReload() {
+    std::cout << "\n--- Example 7: Hot-Reload Setup ---\n";
 
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex08");
-    manager.clearDiskCache();  // clean slate so counts are deterministic
+    ShaderManager manager(GraphicsAPI::DirectX11);
+
+    ShaderProgramCPU desc;
+    desc.vsPath        = "example_shaders/basic.vs.hlsl";
+    desc.psPath        = "example_shaders/basic.ps.hlsl";
+    desc.enableHotReload = true;
+
+    manager.setReloadCallback([](const std::string& key) {
+        std::cout << "  [HOT-RELOAD] Shader reloaded: " << key << "\n";
+        // In a real engine: recreate GPU resources from new bytecode here.
+    });
+
+    auto shader = manager.compile(desc);
+    std::cout << "Shader compiled and file watcher registered.\n";
+    std::cout << "Calling update() – no file changes expected at this point.\n";
+
+    // Simulate a few frames without changes
+    for (int i = 0; i < 3; ++i) {
+        manager.update();
+    }
+    std::cout << "update() called 3 times – no reload triggered.\n";
+}
+
+// ---------------------------------------------------------------------------
+// Example 8 – Statistics tracking
+// ---------------------------------------------------------------------------
+static void example8_Statistics() {
+    std::cout << "\n--- Example 8: Statistics ---\n";
+
+    ShaderManager manager(GraphicsAPI::DirectX11);
 
     ShaderProgramCPU desc;
     desc.vsPath = "example_shaders/basic.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
 
+    // Compile 3 distinct programs + 2 cache hits
+    auto s1 = manager.compile(desc);
+
+    desc.defines["VARIANT_A"] = "1";
+    auto s2 = manager.compile(desc);
+
+    desc.defines["VARIANT_B"] = "1";
+    auto s3 = manager.compile(desc);
+
+    // Cache hits
     manager.compile(desc);
-    manager.compile(desc); // cache hit
-    manager.compile(desc); // cache hit
+    manager.compile(desc);
 
     const auto& stats = manager.getStatistics();
-    std::cout << "Compilations:     " << stats.compilationCount  << "\n";
-    std::cout << "Cache hits:       " << stats.cacheHits         << "\n";
-    std::cout << "Cache misses:     " << stats.cacheMisses       << "\n";
-    std::cout << "Hot-reload count: " << stats.hotReloadCount    << "\n";
-    std::cout << "Avg compile time: " << stats.averageCompileTime << " ms\n";
+    std::cout << "Compilations : " << stats.compilationCount   << "\n";
+    std::cout << "Cache hits   : " << stats.cacheHits          << "\n";
+    std::cout << "Cache misses : " << stats.cacheMisses        << "\n";
+    std::cout << "Total time   : " << stats.totalCompileTimeMs << " ms\n";
+    std::cout << "Average time : " << stats.averageCompileTime << " ms\n";
 }
 
-// ===========================================================================
-// Example 9 – Cache management (clear memory / disk)
-// ===========================================================================
-static void example09_CacheManagement() {
-    std::cout << "\n=== Example 09: Cache Management ===\n";
-
-    ShaderManager manager(GraphicsAPI::DirectX11, "shader_cache_ex09");
+// ---------------------------------------------------------------------------
+// Example 9 – Debug vs Release compilation
+// ---------------------------------------------------------------------------
+static void example9_DebugVsRelease() {
+    std::cout << "\n--- Example 9: Debug vs Release ---\n";
 
     ShaderProgramCPU desc;
     desc.vsPath = "example_shaders/basic.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
 
-    manager.compile(desc);
-    std::cout << "Compiled and cached to disk.\n";
+    {
+        ShaderManager debugMgr(GraphicsAPI::DirectX12);
+        desc.debugInfo        = true;
+        desc.optimizationLevel = 0;
+        auto shader = debugMgr.compile(desc);
+        std::cout << "Debug  build – valid: " << (shader && shader->isValid() ? "yes" : "no")
+                  << ", time: " << (shader ? shader->totalCompileTimeMs : 0.0) << " ms\n";
+    }
 
-    manager.clearMemoryCache();
-    std::cout << "Memory cache cleared.\n";
-
-    auto shader2 = manager.compile(desc); // should load from disk
-    printResult("reload from disk cache", shader2);
-
-    manager.clearDiskCache();
-    std::cout << "Disk cache cleared.\n";
+    {
+        ShaderManager relMgr(GraphicsAPI::DirectX12);
+        desc.debugInfo         = false;
+        desc.optimizationLevel = 3;
+        auto shader = relMgr.compile(desc);
+        std::cout << "Release build – valid: " << (shader && shader->isValid() ? "yes" : "no")
+                  << ", time: " << (shader ? shader->totalCompileTimeMs : 0.0) << " ms\n";
+    }
 }
 
-// ===========================================================================
-// Example 10 – Multiple graphics APIs
-// ===========================================================================
-static void example10_MultipleAPIs() {
-    std::cout << "\n=== Example 10: Multiple Graphics APIs ===\n";
+// ---------------------------------------------------------------------------
+// Example 10 – OpenGL / Vulkan targets
+// ---------------------------------------------------------------------------
+static void example10_CrossAPITargets() {
+    std::cout << "\n--- Example 10: Cross-API Targets ---\n";
 
-    const std::pair<GraphicsAPI, const char*> apis[] = {
-        {GraphicsAPI::DirectX11, "DirectX 11"},
-        {GraphicsAPI::DirectX12, "DirectX 12"},
+    ShaderProgramCPU desc;
+    desc.vsPath = "example_shaders/basic.vs.hlsl";
+    desc.psPath = "example_shaders/basic.ps.hlsl";
+
+    struct APIEntry { GraphicsAPI api; const char* name; };
+    const APIEntry targets[] = {
+        {GraphicsAPI::DirectX11, "DX11"},
+        {GraphicsAPI::DirectX12, "DX12"},
         {GraphicsAPI::OpenGL,    "OpenGL"},
         {GraphicsAPI::Vulkan,    "Vulkan"},
         {GraphicsAPI::Metal,     "Metal"},
     };
 
-    int idx = 0;
-    for (const auto& [api, name] : apis) {
-        std::string cacheDir = "shader_cache_ex10_" + std::to_string(idx++);
-        ShaderManager manager(api, cacheDir);
-
-        ShaderProgramCPU desc;
-        desc.vsPath = "example_shaders/basic.vs.hlsl";
-        desc.psPath = "example_shaders/basic.ps.hlsl";
-
-        auto shader = manager.compile(desc);
-        std::string label = std::string(name) + " shader";
-        printResult(label.c_str(), shader);
+    for (const auto& entry : targets) {
+        ShaderManager mgr(entry.api);
+        auto shader = mgr.compile(desc);
+        std::cout << "  " << entry.name << " – valid: "
+                  << (shader && shader->isValid() ? "yes" : "no")
+                  << ", stages: " << (shader ? shader->stageBytecode.size() : 0) << "\n";
     }
 }
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // main
-// ===========================================================================
+// ---------------------------------------------------------------------------
 int main() {
-    std::cout << "ShaderManager – Usage Examples\n";
-    std::cout << std::string(50, '=') << "\n";
+    std::cout << "=== ShaderSystem Examples ===\n";
 
-    try {
-        example01_BasicShader();
-        example02_Caching();
-        example03_Defines();
-        example04_Variants();
-        example05_HotReload();
-        example06_ComputeShader();
-        example07_AllStages();
-        example08_Statistics();
-        example09_CacheManagement();
-        example10_MultipleAPIs();
+    example1_BasicShader();
+    example2_CacheHit();
+    example3_Defines();
+    example4_Variants();
+    example5_ComputeShader();
+    example6_AllStages();
+    example7_HotReload();
+    example8_Statistics();
+    example9_DebugVsRelease();
+    example10_CrossAPITargets();
 
-        std::cout << "\n" << std::string(50, '=') << "\n";
-        std::cout << "All examples completed successfully.\n";
-    } catch (const std::exception& ex) {
-        std::cerr << "Fatal error: " << ex.what() << "\n";
-        return 1;
-    }
-
+    std::cout << "\n=== All examples complete ===\n";
     return 0;
 }

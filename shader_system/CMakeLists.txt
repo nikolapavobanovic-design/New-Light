@@ -1,49 +1,59 @@
 cmake_minimum_required(VERSION 3.16)
-project(ShaderSystem CXX)
+project(ShaderSystem VERSION 1.0.0 LANGUAGES CXX)
 
+# Require C++17 for std::filesystem (used in future extensions) and
+# structured bindings in the manager implementation.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ---------------------------------------------------------------------------
-# Library target
+# Core library
 # ---------------------------------------------------------------------------
-add_library(shader_system STATIC
+add_library(ShaderSystemLib STATIC
     ShaderTypes.cpp
     ShaderCompiler.cpp
     ShaderManager.cpp
 )
 
-target_include_directories(shader_system PUBLIC
+target_include_directories(ShaderSystemLib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# std::filesystem support
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_link_libraries(shader_system PUBLIC stdc++fs)
+# Enable strict warnings
+if(MSVC)
+    target_compile_options(ShaderSystemLib PRIVATE /W4 /WX)
+else()
+    target_compile_options(ShaderSystemLib PRIVATE
+        -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+    )
 endif()
 
 # ---------------------------------------------------------------------------
 # Example executable
 # ---------------------------------------------------------------------------
 add_executable(ShaderExample Example.cpp)
+target_link_libraries(ShaderExample PRIVATE ShaderSystemLib)
 
-target_link_libraries(ShaderExample PRIVATE shader_system)
-
-# Copy example shaders next to the binary so the example can find them.
-add_custom_command(TARGET ShaderExample POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/example_shaders
-        $<TARGET_FILE_DIR:ShaderExample>/example_shaders
-    COMMENT "Copying example shaders to output directory"
-)
-
-# ---------------------------------------------------------------------------
-# Compiler warnings
-# ---------------------------------------------------------------------------
-if (MSVC)
-    target_compile_options(shader_system  PRIVATE /W4)
-    target_compile_options(ShaderExample  PRIVATE /W4)
-else()
-    target_compile_options(shader_system  PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(ShaderExample  PRIVATE -Wall -Wextra -Wpedantic)
+# On POSIX systems the mock filesystem code requires no extra libraries;
+# add platform-specific link targets here if needed.
+if(WIN32)
+    # D3DCompiler.lib would be linked here for a real DirectX backend:
+    # target_link_libraries(ShaderSystemLib PRIVATE d3dcompiler dxgi d3d11)
 endif()
+
+# ---------------------------------------------------------------------------
+# Installation (optional)
+# ---------------------------------------------------------------------------
+install(TARGETS ShaderSystemLib ShaderExample
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+install(FILES
+    ShaderTypes.h
+    ShaderCompiler.h
+    ShaderManager.h
+    DESTINATION include/ShaderSystem
+)
+install(DIRECTORY example_shaders DESTINATION share/ShaderSystem)

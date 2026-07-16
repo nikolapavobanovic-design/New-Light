@@ -1,390 +1,380 @@
 #include "ShaderManager.h"
+#include "ShaderCompiler.h"
 
 #include <algorithm>
 #include <chrono>
-#include <filesystem>
 #include <fstream>
 #include <functional>
-#include <iostream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
-#include <system_error>
+#include <sys/stat.h>
 
-namespace fs = std::filesystem;
+namespace ShaderSystem {
 
 // ---------------------------------------------------------------------------
-// Cache-key utilities
+// Internal utility: get file modification time as Unix epoch (seconds).
+// Returns -1 on failure.
 // ---------------------------------------------------------------------------
-namespace {
+static int64_t fileModTime(const std::string& path) {
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return -1;
+#if defined(_WIN32)
+    return static_cast<int64_t>(st.st_mtime);
+#else
+    return static_cast<int64_t>(st.st_mtime);
+#endif
+}
 
-// A simple FNV-1a hash over a string.
+// ---------------------------------------------------------------------------
+// A very small, non-cryptographic hash used to build cache keys.
+// ---------------------------------------------------------------------------
 static uint64_t fnv1a(const std::string& s) {
-    uint64_t h = 14695981039346656037ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (unsigned char c : s) {
-        h ^= static_cast<uint64_t>(c);
-        h *= 1099511628211ULL;
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
     }
-    return h;
+    return hash;
 }
 
-// Build a canonical string that uniquely identifies a shader descriptor.
-static std::string descriptorString(const ShaderProgramCPU& desc) {
-    std::ostringstream ss;
-    ss << "vs=" << desc.vsPath
-       << "|ps=" << desc.psPath
-       << "|cs=" << desc.csPath
-       << "|gs=" << desc.gsPath
-       << "|tcs=" << desc.tcsPath
-       << "|tes=" << desc.tesPath
-       << "|opt=" << desc.optimizationLevel
-       << "|vse=" << desc.vsEntry
-       << "|pse=" << desc.psEntry
-       << "|cse=" << desc.csEntry
-       << "|gse=" << desc.gsEntry
-       << "|tcse=" << desc.tcsEntry
-       << "|tese=" << desc.tesEntry;
+// ---------------------------------------------------------------------------
+// ShaderManager – constructor / destructor
+// ---------------------------------------------------------------------------
 
-    // Sort defines for determinism.
-    std::vector<std::pair<std::string,std::string>>
-        sorted(desc.defines.begin(), desc.defines.end());
-    std::sort(sorted.begin(), sorted.end());
-    for (const auto& kv : sorted) {
-        ss << "|def=" << kv.first << "=" << kv.second;
-    }
-    return ss.str();
-}
-
-} // namespace
-
-// ===========================================================================
-// Construction / destruction
-// ===========================================================================
-ShaderManager::ShaderManager(GraphicsAPI api, const std::string& diskCacheDir)
+ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     : m_api(api)
-    , m_diskCacheDir(diskCacheDir)
+    , m_cacheDir(std::move(cacheDir))
     , m_compiler(ShaderCompilerFactory::create(api))
-{
-    // Create disk cache directory if it does not exist.
-    std::error_code ec;
-    fs::create_directories(m_diskCacheDir, ec);
-    if (ec) {
-        std::cerr << "[ShaderManager] Warning: could not create cache dir '"
-                  << m_diskCacheDir << "': " << ec.message() << "\n";
-    }
-}
+{}
 
 ShaderManager::~ShaderManager() = default;
 
-// ===========================================================================
-// Public API – buildCacheKey
-// ===========================================================================
-std::string ShaderManager::buildCacheKey(const ShaderProgramCPU& desc) {
-    const std::string raw = descriptorString(desc);
-    const uint64_t    h   = fnv1a(raw);
+// ---------------------------------------------------------------------------
+// buildCacheKey
+// ---------------------------------------------------------------------------
+std::string ShaderManager::buildCacheKey(const ShaderProgramCPU& desc) const {
+    std::ostringstream oss;
+    oss << static_cast<int>(m_api) << "|"
+        << desc.vsPath  << "|" << desc.vsEntry  << "|"
+        << desc.psPath  << "|" << desc.psEntry  << "|"
+        << desc.csPath  << "|" << desc.csEntry  << "|"
+        << desc.gsPath  << "|" << desc.gsEntry  << "|"
+        << desc.tcsPath << "|" << desc.tcsEntry << "|"
+        << desc.tesPath << "|" << desc.tesEntry << "|"
+        << desc.optimizationLevel << "|"
+        << (desc.debugInfo ? "dbg" : "rel");
 
-    std::ostringstream ss;
-    ss << std::hex << h;
-    return ss.str();
+    // Include defines in a deterministic order
+    std::vector<std::pair<std::string,std::string>> sortedDefs(
+        desc.defines.begin(), desc.defines.end());
+    std::sort(sortedDefs.begin(), sortedDefs.end());
+    for (auto& [k, v] : sortedDefs) {
+        oss << "|" << k << "=" << v;
+    }
+
+    uint64_t h = fnv1a(oss.str());
+    std::ostringstream keyOut;
+    keyOut << std::hex << h;
+    return keyOut.str();
 }
 
-// ===========================================================================
-// Public API – compile
-// ===========================================================================
-std::shared_ptr<CompiledShaderProgram>
-ShaderManager::compile(const ShaderProgramCPU& desc) {
+// ---------------------------------------------------------------------------
+// readFile
+// ---------------------------------------------------------------------------
+std::string ShaderManager::readFile(const std::string& path) {
+    std::ifstream ifs(path, std::ios::in | std::ios::binary);
+    if (!ifs.is_open()) return {};
+    return {std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>()};
+}
+
+// ---------------------------------------------------------------------------
+// compileStage
+// ---------------------------------------------------------------------------
+CompileResult ShaderManager::compileStage(
+    const std::string& source,
+    ShaderStage        stage,
+    const std::string& entryPoint,
+    const std::unordered_map<std::string, std::string>& defines,
+    bool debugInfo,
+    int  optLevel)
+{
+    return m_compiler->compile(source, stage, entryPoint, defines, debugInfo, optLevel);
+}
+
+// ---------------------------------------------------------------------------
+// Disk cache (simple binary serialisation)
+// ---------------------------------------------------------------------------
+
+static std::string diskCachePath(const std::string& dir, const std::string& key) {
+    return dir + "/" + key + ".shcache";
+}
+
+// Very small serialiser: [uint32 numStages] per stage: [uint8 stageId][uint32 bcSize][bytes...]
+std::shared_ptr<ShaderProgram> ShaderManager::loadFromDiskCache(const std::string& key) const {
+    if (m_cacheDir.empty()) return nullptr;
+
+    std::ifstream ifs(diskCachePath(m_cacheDir, key), std::ios::binary);
+    if (!ifs.is_open()) return nullptr;
+
+    auto prog = std::make_shared<ShaderProgram>();
+    prog->cacheKey = key;
+    prog->status   = CompileStatus::Success;
+
+    uint32_t numStages = 0;
+    ifs.read(reinterpret_cast<char*>(&numStages), sizeof(numStages));
+    if (ifs.fail()) return nullptr;
+
+    for (uint32_t i = 0; i < numStages; ++i) {
+        uint8_t stageId = 0;
+        uint32_t bcSize = 0;
+        ifs.read(reinterpret_cast<char*>(&stageId), 1);
+        ifs.read(reinterpret_cast<char*>(&bcSize), sizeof(bcSize));
+        if (ifs.fail()) return nullptr;
+
+        Bytecode bc(bcSize);
+        ifs.read(reinterpret_cast<char*>(bc.data()), bcSize);
+        if (ifs.fail()) return nullptr;
+
+        prog->stageBytecode[static_cast<ShaderStage>(stageId)] = std::move(bc);
+    }
+    return prog;
+}
+
+void ShaderManager::saveToDiskCache(const std::string& key, const ShaderProgram& prog) const {
+    if (m_cacheDir.empty()) return;
+
+    std::ofstream ofs(diskCachePath(m_cacheDir, key), std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) return;
+
+    auto numStages = static_cast<uint32_t>(prog.stageBytecode.size());
+    ofs.write(reinterpret_cast<const char*>(&numStages), sizeof(numStages));
+
+    for (auto& [stage, bc] : prog.stageBytecode) {
+        auto stageId = static_cast<uint8_t>(stage);
+        auto bcSize  = static_cast<uint32_t>(bc.size());
+        ofs.write(reinterpret_cast<const char*>(&stageId), 1);
+        ofs.write(reinterpret_cast<const char*>(&bcSize), sizeof(bcSize));
+        ofs.write(reinterpret_cast<const char*>(bc.data()), bcSize);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// watchSources
+// ---------------------------------------------------------------------------
+void ShaderManager::watchSources(const std::string& key, const ShaderProgramCPU& desc) {
+    WatchEntry entry;
+    entry.desc = desc;
+
+    auto trackFile = [&](const std::string& path) {
+        if (!path.empty()) {
+            entry.fileTimes[path] = fileModTime(path);
+        }
+    };
+    trackFile(desc.vsPath);
+    trackFile(desc.psPath);
+    trackFile(desc.csPath);
+    trackFile(desc.gsPath);
+    trackFile(desc.tcsPath);
+    trackFile(desc.tesPath);
+
+    m_watched[key] = std::move(entry);
+}
+
+// ---------------------------------------------------------------------------
+// compile
+// ---------------------------------------------------------------------------
+std::shared_ptr<ShaderProgram> ShaderManager::compile(const ShaderProgramCPU& desc) {
     const std::string key = buildCacheKey(desc);
 
-    // 1. Check memory cache (fast path).
+    // 1. Memory cache hit
     {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
-        auto it = m_memoryCache.find(key);
-        if (it != m_memoryCache.end()) {
+        auto it = m_memCache.find(key);
+        if (it != m_memCache.end()) {
             ++m_stats.cacheHits;
             return it->second;
         }
     }
 
-    // 2. Check disk cache.
-    {
-        auto diskResult = loadFromDisk(key);
-        if (diskResult) {
-            ++m_stats.cacheHits;
+    // 2. Disk cache hit
+    if (auto prog = loadFromDiskCache(key)) {
+        prog->cacheKey = key;
+        {
             std::lock_guard<std::mutex> lock(m_cacheMutex);
-            m_memoryCache[key] = diskResult;
-            return diskResult;
+            m_memCache[key] = prog;
+        }
+        ++m_stats.cacheHits;
+        if (desc.enableHotReload) watchSources(key, desc);
+        return prog;
+    }
+
+    ++m_stats.cacheMisses;
+
+    // 3. Actual compilation
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    auto prog = std::make_shared<ShaderProgram>();
+    prog->cacheKey = key;
+    prog->status   = CompileStatus::Success;
+
+    struct StageInfo {
+        std::string path;
+        ShaderStage stage;
+        std::string entry;
+    };
+
+    const std::vector<StageInfo> stages = {
+        {desc.vsPath,  ShaderStage::Vertex,      desc.vsEntry},
+        {desc.psPath,  ShaderStage::Pixel,       desc.psEntry},
+        {desc.csPath,  ShaderStage::Compute,     desc.csEntry},
+        {desc.gsPath,  ShaderStage::Geometry,    desc.gsEntry},
+        {desc.tcsPath, ShaderStage::TessControl, desc.tcsEntry},
+        {desc.tesPath, ShaderStage::TessEval,    desc.tesEntry},
+    };
+
+    for (auto& si : stages) {
+        if (si.path.empty()) continue;
+
+        std::string source = readFile(si.path);
+        if (source.empty()) {
+            CompileMessage msg;
+            msg.status  = CompileStatus::Error;
+            msg.message = "Failed to read source file: " + si.path;
+            msg.file    = si.path;
+            prog->stageMessages[si.stage].push_back(msg);
+            prog->status = CompileStatus::Error;
+            ++m_stats.errorCount;
+            continue;
+        }
+
+        CompileResult res = compileStage(
+            source, si.stage, si.entry, desc.defines, desc.debugInfo, desc.optimizationLevel);
+
+        prog->stageMessages[si.stage] = res.messages;
+        prog->totalCompileTimeMs     += res.compileTimeMs;
+
+        if (res.status == CompileStatus::Error) {
+            prog->status = CompileStatus::Error;
+            ++m_stats.errorCount;
+        } else {
+            prog->stageBytecode[si.stage] = std::move(res.bytecode);
         }
     }
 
-    // 3. Compile from source.
-    ++m_stats.cacheMisses;
-    return compileInternal(desc, key);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    prog->totalCompileTimeMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    ++m_stats.compilationCount;
+    m_stats.totalCompileTimeMs += prog->totalCompileTimeMs;
+    if (m_stats.compilationCount > 0) {
+        m_stats.averageCompileTime =
+            m_stats.totalCompileTimeMs / static_cast<double>(m_stats.compilationCount);
+    }
+
+    if (prog->isValid()) {
+        {
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
+            m_memCache[key] = prog;
+        }
+        saveToDiskCache(key, *prog);
+    }
+
+    if (desc.enableHotReload) watchSources(key, desc);
+
+    return prog;
 }
 
-// ===========================================================================
-// Public API – compileVariants
-// ===========================================================================
-std::vector<std::shared_ptr<CompiledShaderProgram>>
-ShaderManager::compileVariants(
-    const ShaderProgramCPU&                      base,
+// ---------------------------------------------------------------------------
+// compileVariants
+// ---------------------------------------------------------------------------
+std::vector<std::shared_ptr<ShaderProgram>> ShaderManager::compileVariants(
+    const ShaderProgramCPU& base,
     const std::vector<std::vector<std::string>>& variantDefines)
 {
-    std::vector<std::shared_ptr<CompiledShaderProgram>> results;
+    std::vector<std::shared_ptr<ShaderProgram>> results;
     results.reserve(variantDefines.size());
 
-    for (const auto& names : variantDefines) {
+    for (auto& extraDefines : variantDefines) {
         ShaderProgramCPU desc = base;
-        for (const auto& name : names) {
-            desc.defines[name] = "1";
+        for (auto& def : extraDefines) {
+            desc.defines[def] = "1";
         }
         results.push_back(compile(desc));
     }
-
     return results;
 }
 
-// ===========================================================================
-// Hot-reload
-// ===========================================================================
-void ShaderManager::setReloadCallback(ReloadCallback cb) {
-    std::lock_guard<std::mutex> lock(m_watchMutex);
-    m_reloadCallback = std::move(cb);
-}
-
+// ---------------------------------------------------------------------------
+// Hot-reload: update()
+// ---------------------------------------------------------------------------
 void ShaderManager::update() {
-    std::vector<std::pair<std::string, std::string>> stale; // (path, key)
+    for (auto& [key, entry] : m_watched) {
+        bool changed = false;
+        for (auto& [path, oldTime] : entry.fileTimes) {
+            int64_t newTime = fileModTime(path);
+            if (newTime != oldTime && newTime != -1) {
+                changed  = true;
+                oldTime  = newTime;
+            }
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(m_watchMutex);
-        for (auto& [path, entry] : m_watchEntries) {
-            auto current = getLastModified(path);
-            if (current > entry.lastModified) {
-                entry.lastModified = current;
-                for (const auto& key : entry.dependentKeys) {
-                    stale.emplace_back(path, key);
+        if (changed) {
+            // Invalidate memory cache and recompile
+            {
+                std::lock_guard<std::mutex> lock(m_cacheMutex);
+                m_memCache.erase(key);
+            }
+
+            auto prog = compile(entry.desc);
+            if (prog && prog->isValid()) {
+                ++m_stats.hotReloadCount;
+                if (m_reloadCallback) {
+                    m_reloadCallback(key);
                 }
             }
         }
     }
-
-    if (stale.empty()) return;
-
-    // Evict stale entries from memory cache.
-    {
-        std::lock_guard<std::mutex> lock(m_cacheMutex);
-        for (const auto& [path, key] : stale) {
-            m_memoryCache.erase(key);
-        }
-    }
-
-    // Fire callback.
-    ReloadCallback cb;
-    {
-        std::lock_guard<std::mutex> lock(m_watchMutex);
-        cb = m_reloadCallback;
-    }
-    if (cb) {
-        for (const auto& [path, key] : stale) {
-            ++m_stats.hotReloadCount;
-            cb(key);
-        }
-    }
 }
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// setReloadCallback
+// ---------------------------------------------------------------------------
+void ShaderManager::setReloadCallback(ReloadCallback cb) {
+    m_reloadCallback = std::move(cb);
+}
+
+// ---------------------------------------------------------------------------
 // Cache management
-// ===========================================================================
+// ---------------------------------------------------------------------------
 void ShaderManager::clearMemoryCache() {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
-    m_memoryCache.clear();
+    m_memCache.clear();
 }
 
-void ShaderManager::clearDiskCache() {
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(m_diskCacheDir, ec)) {
-        fs::remove(entry.path(), ec);
-    }
-}
-
-// ===========================================================================
-// Private – compileInternal
-// ===========================================================================
-std::shared_ptr<CompiledShaderProgram>
-ShaderManager::compileInternal(const ShaderProgramCPU& desc,
-                                const std::string&      key)
-{
-    auto program       = std::make_shared<CompiledShaderProgram>();
-    program->cacheKey  = key;
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    // Helper: compile one stage if path is non-empty.
-    auto tryCompile = [&](const std::string& path,
-                          ShaderStage        stage,
-                          const std::string& entry) -> bool {
-        if (path.empty()) return true;  // stage not requested
-        std::string err;
-        auto bytecode = compileStage(path, stage, entry, desc, err);
-        if (bytecode.empty()) {
-            std::cerr << "[ShaderManager] Compile error in '" << path
-                      << "': " << err << "\n";
-            return false;
+void ShaderManager::evictStaleEntries() {
+    std::lock_guard<std::mutex> lock(m_cacheMutex);
+    for (auto it = m_memCache.begin(); it != m_memCache.end(); ) {
+        // Check if the watched entry still has valid files
+        auto wit = m_watched.find(it->first);
+        if (wit != m_watched.end()) {
+            bool anyMissing = false;
+            for (auto& [path, mtime] : wit->second.fileTimes) {
+                (void)mtime;
+                if (fileModTime(path) == -1) { anyMissing = true; break; }
+            }
+            if (anyMissing) { it = m_memCache.erase(it); continue; }
         }
-        program->stageBytecode[stage] = std::move(bytecode);
-
-        // Register watch entry for hot-reload.
-        if (desc.enableHotReload) {
-            registerWatch(path, key);
-        }
-        return true;
-    };
-
-    bool ok = true;
-    ok = ok && tryCompile(desc.vsPath,  ShaderStage::Vertex,      desc.vsEntry);
-    ok = ok && tryCompile(desc.psPath,  ShaderStage::Pixel,       desc.psEntry);
-    ok = ok && tryCompile(desc.csPath,  ShaderStage::Compute,     desc.csEntry);
-    ok = ok && tryCompile(desc.gsPath,  ShaderStage::Geometry,    desc.gsEntry);
-    ok = ok && tryCompile(desc.tcsPath, ShaderStage::TessControl, desc.tcsEntry);
-    ok = ok && tryCompile(desc.tesPath, ShaderStage::TessEval,    desc.tesEntry);
-
-    if (!ok || program->stageBytecode.empty()) {
-        return nullptr;
-    }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    recordCompileTime(ms);
-
-    ++m_stats.compilationCount;
-
-    // Store in memory cache.
-    {
-        std::lock_guard<std::mutex> lock(m_cacheMutex);
-        m_memoryCache[key] = program;
-    }
-
-    // Persist to disk.
-    saveToDisk(key, *program);
-
-    return program;
-}
-
-// ===========================================================================
-// Private – compileStage
-// ===========================================================================
-std::vector<uint8_t> ShaderManager::compileStage(
-    const std::string& sourcePath,
-    ShaderStage        stage,
-    const std::string& entryPoint,
-    const ShaderProgramCPU& desc,
-    std::string&       outError)
-{
-    CompileResult result = m_compiler->compile(
-        sourcePath, stage, entryPoint, desc.defines, desc.optimizationLevel);
-
-    if (result.status != CompileStatus::Success) {
-        outError = result.errorMessage;
-        return {};
-    }
-    return std::move(result.bytecode);
-}
-
-// ===========================================================================
-// Private – disk cache helpers
-// ===========================================================================
-std::string ShaderManager::diskCachePath(const std::string& key) const {
-    return m_diskCacheDir + "/" + key + ".cache";
-}
-
-bool ShaderManager::saveToDisk(const std::string&           key,
-                                const CompiledShaderProgram& program) const
-{
-    std::ofstream file(diskCachePath(key), std::ios::binary);
-    if (!file.is_open()) return false;
-
-    // Simple binary format:
-    // [uint32 stageCount]
-    //   per stage: [uint32 stageId] [uint64 byteLen] [bytes...]
-    uint32_t stageCount = static_cast<uint32_t>(program.stageBytecode.size());
-    file.write(reinterpret_cast<const char*>(&stageCount), sizeof(stageCount));
-
-    for (const auto& [stage, bytecode] : program.stageBytecode) {
-        uint32_t sid = static_cast<uint32_t>(stage);
-        uint64_t len = static_cast<uint64_t>(bytecode.size());
-        file.write(reinterpret_cast<const char*>(&sid), sizeof(sid));
-        file.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        file.write(reinterpret_cast<const char*>(bytecode.data()),
-                   static_cast<std::streamsize>(len));
-    }
-    return file.good();
-}
-
-std::shared_ptr<CompiledShaderProgram>
-ShaderManager::loadFromDisk(const std::string& key) const {
-    std::ifstream file(diskCachePath(key), std::ios::binary);
-    if (!file.is_open()) return nullptr;
-
-    uint32_t stageCount = 0;
-    file.read(reinterpret_cast<char*>(&stageCount), sizeof(stageCount));
-    if (!file) return nullptr;
-
-    auto program      = std::make_shared<CompiledShaderProgram>();
-    program->cacheKey = key;
-
-    for (uint32_t i = 0; i < stageCount; ++i) {
-        uint32_t sid = 0;
-        uint64_t len = 0;
-        file.read(reinterpret_cast<char*>(&sid), sizeof(sid));
-        file.read(reinterpret_cast<char*>(&len), sizeof(len));
-        if (!file) return nullptr;
-
-        auto stage = static_cast<ShaderStage>(sid);
-        std::vector<uint8_t> bytecode(static_cast<size_t>(len));
-        file.read(reinterpret_cast<char*>(bytecode.data()),
-                  static_cast<std::streamsize>(len));
-        if (!file) return nullptr;
-
-        program->stageBytecode[stage] = std::move(bytecode);
-    }
-
-    return program->stageBytecode.empty() ? nullptr : program;
-}
-
-// ===========================================================================
-// Private – file-watching helpers
-// ===========================================================================
-void ShaderManager::registerWatch(const std::string& path,
-                                   const std::string& cacheKey) {
-    std::lock_guard<std::mutex> lock(m_watchMutex);
-    auto& entry = m_watchEntries[path];
-    entry.path  = path;
-    if (entry.lastModified == std::chrono::system_clock::time_point{}) {
-        entry.lastModified = getLastModified(path);
-    }
-    // Only add if not already tracked.
-    const auto& deps = entry.dependentKeys;
-    if (std::find(deps.begin(), deps.end(), cacheKey) == deps.end()) {
-        entry.dependentKeys.push_back(cacheKey);
+        ++it;
     }
 }
 
-std::chrono::system_clock::time_point
-ShaderManager::getLastModified(const std::string& path) const {
-    std::error_code ec;
-    auto ftime = fs::last_write_time(path, ec);
-    if (ec) return {};
-    // Convert file_time_type to system_clock::time_point.
-    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-        ftime - fs::file_time_type::clock::now() +
-        std::chrono::system_clock::now());
-    return sctp;
+// ---------------------------------------------------------------------------
+// Statistics
+// ---------------------------------------------------------------------------
+void ShaderManager::resetStatistics() {
+    m_stats = ShaderStatistics{};
 }
 
-// ===========================================================================
-// Private – statistics helpers
-// ===========================================================================
-void ShaderManager::recordCompileTime(double ms) {
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    m_totalCompileTime += ms;
-    uint64_t count = m_stats.compilationCount.load() + 1; // +1 for current
-    m_stats.averageCompileTime = m_totalCompileTime / static_cast<double>(count);
-}
+} // namespace ShaderSystem

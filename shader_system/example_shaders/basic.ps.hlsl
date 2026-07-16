@@ -1,31 +1,28 @@
 // basic.ps.hlsl – Simple pixel shader
-// Entry point: PSMain
+// Samples a diffuse texture and applies a directional light.
 
-Texture2D    gDiffuseMap : register(t0);
-SamplerState gSampler    : register(s0);
+Texture2D    DiffuseMap : register(t0);
+SamplerState LinearSampler : register(s0);
 
-cbuffer PerFrame : register(b1) {
-    float3 gLightDir;
-    float  gPad;
-    float3 gLightColor;
-    float  gPad2;
-    float3 gAmbient;
-    float  gPad3;
+cbuffer LightData : register(b1)
+{
+    float3 LightDir;
+    float  Padding;
+    float3 LightColor;
+    float  Intensity;
 };
 
-struct PixelIn {
-    float4 posH   : SV_POSITION;
-    float3 posW   : POSITION;
-    float3 normalW: NORMAL;
-    float2 texC   : TEXCOORD;
+struct PSInput
+{
+    float4 Position : SV_Position;
+    float2 TexCoord : TEXCOORD0;
+    float3 Normal   : TEXCOORD1;
 };
 
-float4 PSMain(PixelIn pin) : SV_TARGET {
-    float3 normal   = normalize(pin.normalW);
-    float  NdotL    = saturate(dot(normal, -normalize(gLightDir)));
-    float4 diffuse  = gDiffuseMap.Sample(gSampler, pin.texC);
-
-    float3 ambient  = gAmbient * diffuse.rgb;
-    float3 lighting = ambient + NdotL * gLightColor * diffuse.rgb;
-    return float4(lighting, diffuse.a);
+float4 PSMain(PSInput IN) : SV_Target
+{
+    float4 diffuse  = DiffuseMap.Sample(LinearSampler, IN.TexCoord);
+    float  NdotL    = saturate(dot(normalize(IN.Normal), -normalize(LightDir)));
+    float3 lighting = LightColor * Intensity * NdotL;
+    return float4(diffuse.rgb * lighting, diffuse.a);
 }

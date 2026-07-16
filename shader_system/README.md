@@ -1,86 +1,90 @@
-# Shader Management System
+# ShaderSystem
 
-A production-ready, platform-agnostic shader management system for C++ graphics applications. Supports DirectX 11/12, OpenGL, Vulkan, and Metal through a unified API with caching, hot-reload, and shader variant generation.
+A production-ready, cross-platform **shader management system** for game engines and real-time graphics applications.
 
----
+## Features
+
+| Feature | Description |
+|---|---|
+| **Multi-API** | DirectX 11/12, OpenGL, Vulkan, Metal |
+| **Two-tier cache** | In-memory (instant) + on-disk (persistent) |
+| **Hot-reload** | File-change detection with a callback API |
+| **Shader variants** | Compile permutation lists in one call |
+| **Preprocessor defines** | Per-program macro injection |
+| **Statistics** | Compilation counts, cache ratios, timings |
+| **Thread-safe** | Mutex-guarded memory cache |
 
 ## File Structure
 
 ```
 shader_system/
-├── ShaderTypes.h/cpp          # Core types and enumerations
-├── ShaderCompiler.h/cpp       # Platform-specific compilers
-├── ShaderManager.h/cpp        # Central management system
-├── Example.cpp                # 10 usage examples
-├── CMakeLists.txt             # Build configuration
-├── README.md                  # This file
+├── ShaderTypes.h/cpp       # Core types (stages, APIs, results, reflection)
+├── ShaderCompiler.h/cpp    # Backend compilers (DX, GLSL, SPIR-V)
+├── ShaderManager.h/cpp     # Central manager
+├── Example.cpp             # 10 runnable usage examples
+├── CMakeLists.txt          # Build configuration
+├── README.md               # This file
 └── example_shaders/
-    ├── basic.vs.hlsl          # Simple vertex shader
-    ├── basic.ps.hlsl          # Simple pixel shader
-    └── pbr.vs.hlsl            # PBR vertex shader with variant support
+    ├── basic.vs.hlsl       # Simple vertex shader
+    ├── basic.ps.hlsl       # Simple pixel/fragment shader
+    └── pbr.vs.hlsl         # Advanced PBR vertex shader (SKINNED/INSTANCED variants)
 ```
-
----
-
-## Building
-
-```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
-./ShaderExample        # Run the examples
-```
-
----
 
 ## Quick Start
 
-```cpp
-#include "ShaderManager.h"
+### 1. Build
 
-// 1. Create manager for your target API.
-ShaderManager manager(GraphicsAPI::DirectX11);
-
-// 2. Describe your shader program.
-ShaderProgramCPU desc;
-desc.vsPath = "shaders/my.vs.hlsl";
-desc.psPath = "shaders/my.ps.hlsl";
-
-// 3. Compile (or retrieve from cache).
-auto shader = manager.compile(desc);
-if (!shader) { /* handle error */ }
-
-// 4. Use the bytecode with your graphics API.
-auto& vsBytecode = shader->stageBytecode[ShaderStage::Vertex];
-auto& psBytecode = shader->stageBytecode[ShaderStage::Pixel];
+```bash
+cd shader_system
+mkdir build && cd build
+cmake ..
+cmake --build .
+./ShaderExample
 ```
 
----
-
-## Features
-
-### Automatic Two-Tier Caching
-
-Compiled shaders are cached in memory (instant lookup) and on disk (persistent across runs). The cache key is a deterministic hash of all descriptor fields.
+### 2. Basic Usage
 
 ```cpp
-auto s1 = manager.compile(desc);  // miss  -> compile + cache
-auto s2 = manager.compile(desc);  // hit   -> <1 ms
+#include "ShaderManager.h"
+using namespace ShaderSystem;
+
+ShaderManager manager(GraphicsAPI::DirectX11);
+
+ShaderProgramCPU desc;
+desc.vsPath = "shaders/basic.vs.hlsl";
+desc.psPath = "shaders/basic.ps.hlsl";
+
+auto shader = manager.compile(desc);
+if (shader && shader->isValid()) {
+    auto& vsBytecode = shader->stageBytecode[ShaderStage::Vertex];
+    // Feed bytecode to graphics API...
+}
+```
+
+## Usage Examples
+
+### Caching
+
+```cpp
+// First compile – hits the compiler.
+auto shader = manager.compile(desc);
+
+// Second compile – returns the cached pointer in < 1 ms.
+auto shader2 = manager.compile(desc);
 ```
 
 ### Preprocessor Defines
 
 ```cpp
 desc.defines = {
-    {"MAX_LIGHTS",     "4"},
-    {"USE_NORMAL_MAP", "1"}
+    {"MAX_LIGHTS",      "4"},
+    {"USE_NORMAL_MAP",  "1"},
+    {"SHADOW_MAP_SIZE", "2048"},
 };
 auto shader = manager.compile(desc);
 ```
 
 ### Shader Variants
-
-Compile multiple permutations of one base descriptor in a single call.
 
 ```cpp
 ShaderProgramCPU base;
@@ -88,11 +92,13 @@ base.vsPath = "pbr.vs.hlsl";
 base.psPath = "pbr.ps.hlsl";
 
 auto shaders = manager.compileVariants(base, {
-    {},                       // Base
-    {"SKINNED"},              // Skinned meshes
-    {"INSTANCED"},            // GPU instancing
-    {"SKINNED", "INSTANCED"} // Both
+    {},                          // Base
+    {"SKINNED"},                 // Skinned meshes
+    {"INSTANCED"},               // GPU instancing
+    {"SKINNED", "INSTANCED"},    // Both
+    {"ALPHA_TEST"},              // Alpha testing
 });
+// Returns 5 std::shared_ptr<ShaderProgram>
 ```
 
 ### Hot-Reload
@@ -101,23 +107,17 @@ auto shaders = manager.compileVariants(base, {
 desc.enableHotReload = true;
 
 manager.setReloadCallback([](const std::string& key) {
-    std::cout << "Reloaded: " << key << "\n";
-    // Recreate GPU resources here.
+    std::cout << "Shader reloaded: " << key << "\n";
+    // Recreate GPU resources here...
 });
 
+auto shader = manager.compile(desc);
+
+// Game loop
 while (running) {
-    manager.update();  // Checks file timestamps; fires callback on changes.
+    manager.update(); // polls file-system for changes
     render();
 }
-```
-
-### Statistics
-
-```cpp
-const auto& s = manager.getStatistics();
-std::cout << "Compilations: " << s.compilationCount  << "\n";
-std::cout << "Cache hits:   " << s.cacheHits         << "\n";
-std::cout << "Avg time:     " << s.averageCompileTime << " ms\n";
 ```
 
 ### All Pipeline Stages
@@ -125,69 +125,88 @@ std::cout << "Avg time:     " << s.averageCompileTime << " ms\n";
 ```cpp
 desc.vsPath  = "mesh.vs.hlsl";
 desc.gsPath  = "mesh.gs.hlsl";
+desc.tcsPath = "mesh.hs.hlsl"; // Hull shader
+desc.tesPath = "mesh.ds.hlsl"; // Domain shader
 desc.psPath  = "mesh.ps.hlsl";
-desc.tcsPath = "mesh.hs.hlsl";   // Hull / Tessellation Control
-desc.tesPath = "mesh.ds.hlsl";   // Domain / Tessellation Evaluation
-desc.csPath  = "particles.cs.hlsl";
+
+auto shader = manager.compile(desc);
 ```
 
----
+### Compute Shader
 
-## Integrating with Graphics APIs
+```cpp
+ShaderProgramCPU desc;
+desc.csPath  = "particles.cs.hlsl";
+desc.csEntry = "CSMain";
+desc.defines = {{"THREAD_GROUP_SIZE", "64"}};
 
-The system returns raw bytecode. Use it directly with your API:
+auto shader = manager.compile(desc);
+auto& csBytecode = shader->stageBytecode[ShaderStage::Compute];
+```
+
+### Statistics
+
+```cpp
+const auto& stats = manager.getStatistics();
+std::cout << "Compilations : " << stats.compilationCount   << "\n";
+std::cout << "Cache hits   : " << stats.cacheHits          << "\n";
+std::cout << "Average time : " << stats.averageCompileTime << " ms\n";
+```
+
+### Persistent Disk Cache
+
+```cpp
+// Pass a directory path; the manager will read/write .shcache files.
+ShaderManager manager(GraphicsAPI::Vulkan, "/tmp/shader_cache");
+```
+
+## Graphics API Integration
 
 ### DirectX 11
+
 ```cpp
 auto& bc = shader->stageBytecode[ShaderStage::Vertex];
-ID3D11VertexShader* vs;
+ID3D11VertexShader* vs = nullptr;
 device->CreateVertexShader(bc.data(), bc.size(), nullptr, &vs);
 ```
 
 ### DirectX 12
+
 ```cpp
-D3D12_SHADER_BYTECODE vsBC;
-vsBC.pShaderBytecode = bc.data();
-vsBC.BytecodeLength  = bc.size();
+auto& bc = shader->stageBytecode[ShaderStage::Vertex];
+D3D12_SHADER_BYTECODE bytecode{ bc.data(), bc.size() };
+psoDesc.VS = bytecode;
 ```
 
 ### Vulkan
+
 ```cpp
-VkShaderModuleCreateInfo info{};
-info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+auto& bc = shader->stageBytecode[ShaderStage::Vertex];
+VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
 info.codeSize = bc.size();
 info.pCode    = reinterpret_cast<const uint32_t*>(bc.data());
 vkCreateShaderModule(device, &info, nullptr, &module);
 ```
 
-### OpenGL
-```cpp
-// GLSL source is returned as text bytes; upload with glShaderSource.
-GLuint shader = glCreateShader(GL_VERTEX_SHADER);
-const char* src = reinterpret_cast<const char*>(bc.data());
-GLint len = static_cast<GLint>(bc.size());
-glShaderSource(shader, 1, &src, &len);
-glCompileShader(shader);
-```
+## Production Integration
 
----
+The backend compilers in `ShaderCompiler.cpp` ship with **mock implementations** that produce placeholder bytecode. To switch to real compilation:
 
-## Production Notes
-
-The implementation ships with **mock compilers** for portability. Replace the mock `compile()` bodies in `ShaderCompiler.cpp` with real compiler calls:
-
-| Target | Library / Tool |
+| Target | Action |
 |---|---|
-| DirectX 11/12 | `D3DCompiler.lib` → `D3DCompile()` or `DXC` |
-| OpenGL | `glslang` |
-| Vulkan | `glslang` + SPIRV-Tools, or `shaderc` |
-| Metal | `MTLDevice.newLibraryWithSource:options:error:` |
+| **DirectX 11** | Link `D3DCompiler.lib`, call `D3DCompile()` |
+| **DirectX 12** | Link `dxcompiler.lib`, call DXC APIs |
+| **OpenGL / Vulkan** | Integrate `glslang` or `shaderc` |
+| **Metal** | Call `MTLDevice newLibraryWithSource:` |
 
-The architecture ensures only the `compile()` method in each compiler class needs changing.
+Each integration point is marked with a `// --- PRODUCTION INTEGRATION POINT ---` comment in `ShaderCompiler.cpp`.
 
----
+## Requirements
 
-## Thread Safety
+- C++17 or later
+- CMake 3.16+
+- No third-party dependencies for the core library (mock compilers only)
 
-- `ShaderManager::compile()` is thread-safe; the memory cache is protected by a mutex.
-- `ShaderManager::update()` is **not** intended to be called concurrently with itself; call it from one thread (e.g. the main/render thread) each frame.
+## License
+
+See the root repository LICENSE file.
