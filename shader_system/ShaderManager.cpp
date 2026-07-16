@@ -150,9 +150,6 @@ void ShaderManager::saveToDiskCache(const std::string& key, const ShaderProgram&
     std::filesystem::create_directories(m_cacheDir, ec);
     if (ec) return;
 
-    const auto cachePath = std::filesystem::path(m_cacheDir);
-    if (!std::filesystem::is_directory(cachePath, ec) || ec) return;
-
     std::ofstream ofs(diskCachePath(m_cacheDir, key), std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return;
 
