@@ -119,7 +119,7 @@ CompileResult GLSLShaderCompiler::compile(
     // -----------------------------------------------------------------
     // Production integration point:
     //   glslang::InitializeProcess();
-    //   glslang::TShader shader(eeqStage);
+    //   glslang::TShader shader(eShStage);
     //   shader.setStrings(...);
     //   shader.parse(...);
     // -----------------------------------------------------------------

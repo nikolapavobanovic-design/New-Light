@@ -386,6 +386,5 @@ void ShaderManager::recordCompileTime(double ms) {
     std::lock_guard<std::mutex> lock(m_statsMutex);
     m_totalCompileTime += ms;
     uint64_t count = m_stats.compilationCount.load() + 1; // +1 for current
-    const_cast<ShaderManagerStats&>(m_stats).averageCompileTime =
-        m_totalCompileTime / static_cast<double>(count);
+    m_stats.averageCompileTime = m_totalCompileTime / static_cast<double>(count);
 }
