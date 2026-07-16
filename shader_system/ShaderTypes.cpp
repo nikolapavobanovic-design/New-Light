@@ -16,8 +16,9 @@ const char* stageName(ShaderStage stage) {
         case ShaderStage::Geometry:    return "Geometry";
         case ShaderStage::TessControl: return "TessControl";
         case ShaderStage::TessEval:    return "TessEval";
-        default:                       return "Unknown";
+        case ShaderStage::COUNT:       return "Invalid";
     }
+    return "Unknown";
 }
 
 // Returns a human-readable name for a GraphicsAPI value.

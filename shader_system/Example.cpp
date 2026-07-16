@@ -277,19 +277,19 @@ static void example10_CrossAPITargets() {
     desc.vsPath = "example_shaders/basic.vs.hlsl";
     desc.psPath = "example_shaders/basic.ps.hlsl";
 
-    const GraphicsAPI targets[] = {
-        GraphicsAPI::DirectX11,
-        GraphicsAPI::DirectX12,
-        GraphicsAPI::OpenGL,
-        GraphicsAPI::Vulkan,
-        GraphicsAPI::Metal,
+    struct APIEntry { GraphicsAPI api; const char* name; };
+    const APIEntry targets[] = {
+        {GraphicsAPI::DirectX11, "DX11"},
+        {GraphicsAPI::DirectX12, "DX12"},
+        {GraphicsAPI::OpenGL,    "OpenGL"},
+        {GraphicsAPI::Vulkan,    "Vulkan"},
+        {GraphicsAPI::Metal,     "Metal"},
     };
-    const char* names[] = {"DX11", "DX12", "OpenGL", "Vulkan", "Metal"};
 
-    for (int i = 0; i < 5; ++i) {
-        ShaderManager mgr(targets[i]);
+    for (const auto& entry : targets) {
+        ShaderManager mgr(entry.api);
         auto shader = mgr.compile(desc);
-        std::cout << "  " << names[i] << " – valid: "
+        std::cout << "  " << entry.name << " – valid: "
                   << (shader && shader->isValid() ? "yes" : "no")
                   << ", stages: " << (shader ? shader->stageBytecode.size() : 0) << "\n";
     }

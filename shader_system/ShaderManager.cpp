@@ -360,7 +360,8 @@ void ShaderManager::evictStaleEntries() {
         auto wit = m_watched.find(it->first);
         if (wit != m_watched.end()) {
             bool anyMissing = false;
-            for (auto& [path, _] : wit->second.fileTimes) {
+            for (auto& [path, mtime] : wit->second.fileTimes) {
+                (void)mtime;
                 if (fileModTime(path) == -1) { anyMissing = true; break; }
             }
             if (anyMissing) { it = m_memCache.erase(it); continue; }
