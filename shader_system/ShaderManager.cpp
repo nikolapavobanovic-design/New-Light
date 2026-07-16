@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <sys/stat.h>
 
 namespace ShaderSystem {
@@ -46,7 +48,12 @@ ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     : m_api(api)
     , m_cacheDir(std::move(cacheDir))
     , m_compiler(ShaderCompilerFactory::create(api))
-{}
+{
+    if (!m_cacheDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(m_cacheDir, ec);
+    }
+}
 
 ShaderManager::~ShaderManager() = default;
 
