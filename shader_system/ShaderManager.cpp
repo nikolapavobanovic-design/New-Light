@@ -52,6 +52,11 @@ ShaderManager::ShaderManager(GraphicsAPI api, std::string cacheDir)
     if (!m_cacheDir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(m_cacheDir, ec);
+        if (ec) {
+            throw std::runtime_error(
+                "ShaderManager: failed to create cache directory '" +
+                m_cacheDir + "': " + ec.message());
+        }
     }
 }
 
